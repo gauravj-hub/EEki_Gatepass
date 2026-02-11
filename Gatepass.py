@@ -8,37 +8,14 @@ st.title("Eeki Gatepass Reader (Customer / Crop / Bags / Qty)")
 
 uploaded = st.file_uploader("Upload Gatepass (PDF)", type=["pdf"])
 
-# ---------- Helpers ----------
-
 def extract_customer_from_text(text: str) -> str:
-    """Get customer name from the 'To:' line."""
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     for line in lines:
         if line.startswith("To:"):
-            # e.g. "To: Kiranakart Wholesale Pvt Ltd"
             return line.replace("To:", "").strip()
     return ""
 
-def find_table_indices(header: list):
-    """
-    Find indices for Crop, Bags, Quantity columns
-    using flexible keyword matching.
-    """
-    lower = [(h or "").lower() for h in header]
-
-    crop_idx = next((i for i, h in enumerate(lower) if "crop" in h), None)
-    bags_idx = next((i for i, h in enumerate(lower) if "bag" in h), None)
-    qty_idx  = next(
-        (i for i, h in enumerate(lower) if "qty" in h or "quantity" in h),
-        None,
-    )
-
-    if crop_idx is None or bags_idx is None or qty_idx is None:
-        return None
-    return crop_idx, bags_idx, qty_idx
-
 def parse_gatepass_pdf(file_bytes: bytes) -> pd.DataFrame:
-    """Return dataframe with Customer, Crop, Bags, Quantity_kg from a gatepass PDF."""
     rows = []
 
     with pdfplumber.open(BytesIO(file_bytes)) as pdf:
@@ -52,11 +29,20 @@ def parse_gatepass_pdf(file_bytes: bytes) -> pd.DataFrame:
                     continue
 
                 header = [c.strip() if c else "" for c in tbl[0]]
-                idxs = find_table_indices(header)
-                if idxs is None:
+
+                # Our PDF has these exact headers in English part:
+                # "Crop Name | Total Number of Bags/Boxes | Weight per box (kgs) | Total Quantity (kgs)"
+                needed = [
+                    "Crop Name",
+                    "Total Number of Bags/Boxes",
+                    "Total Quantity (kgs)",
+                ]
+                if not all(h in header for h in needed):
                     continue
 
-                crop_idx, bags_idx, qty_idx = idxs
+                crop_idx = header.index("Crop Name")
+                bags_idx = header.index("Total Number of Bags/Boxes")
+                qty_idx = header.index("Total Quantity (kgs)")
 
                 for r in tbl[1:]:
                     if not r:
@@ -89,18 +75,15 @@ def parse_gatepass_pdf(file_bytes: bytes) -> pd.DataFrame:
 
     return pd.DataFrame(rows)
 
-# ---------- UI logic ----------
-
 if uploaded:
     df = parse_gatepass_pdf(uploaded.read())
     if df.empty:
         st.error(
             "Could not detect customer/crop table in this PDF. "
-            "Check if it has a crop / bags / quantity table."
+            "Try another gatepass or we need to adjust header detection."
         )
     else:
         st.success("Gatepass read successfully ✅")
         st.dataframe(df, use_container_width=True)
-
         csv = df.to_csv(index=False).encode("utf-8")
         st.download_button("Download CSV", csv, "gatepass_summary.csv")
