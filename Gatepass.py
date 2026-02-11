@@ -1,116 +1,69 @@
 import streamlit as st
-import pdfplumber
+import sys
+
+# --- FORCED DEPENDENCY CHECK ---
+try:
+    import pdfplumber
+except ImportError:
+    st.error("### ❌ Dependency Error")
+    st.info("The package **'pdfplumber'** is not installed yet. Streamlit Cloud is likely still building your environment.")
+    st.markdown("Please wait 1-2 minutes and **refresh the page**. If it still fails, ensure your `requirements.txt` is in the root folder.")
+    st.stop()
+
 import pandas as pd
 from io import BytesIO
 
-# --- Page Configuration ---
+# --- APP CONFIG ---
 st.set_page_config(page_title="Gatepass Reader", page_icon="🚚", layout="wide")
 
-st.markdown("""
-    ## 🚚 Eeki Gatepass Reader
-    Upload your PDF gatepass to extract Customer, Crop, Bags, and Quantity data.
-""")
+st.title("🚚 Eeki Gatepass Reader")
+st.subheader("Extract Data from PDF Gatepasses")
 
-def extract_customer_from_text(text: str) -> str:
-    """Extracts the customer name after the 'To:' label."""
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-    for i, line in enumerate(lines):
-        if line.upper().startswith("TO:"):
-            # Check if name is on the same line (e.g., "To: Customer Name")
-            customer = line[3:].strip()
-            # If the same line is empty, the name is likely on the very next line
-            if not customer and i + 1 < len(lines):
-                customer = lines[i+1]
-            return customer
-    return "Not Found"
+def extract_customer(text):
+    for line in text.split('\n'):
+        if "To:" in line:
+            return line.replace("To:", "").strip()
+    return "Unknown Customer"
 
-def parse_gatepass_pdf(file_bytes: bytes) -> pd.DataFrame:
-    rows = []
-    with pdfplumber.open(BytesIO(file_bytes)) as pdf:
+def process_pdf(file):
+    all_data = []
+    with pdfplumber.open(BytesIO(file)) as pdf:
         for page in pdf.pages:
             text = page.extract_text() or ""
-            customer = extract_customer_from_text(text)
-
+            customer = extract_customer(text)
+            
             tables = page.extract_tables()
-            for tbl in tables:
-                if not tbl or len(tbl) < 2:
-                    continue
-                
-                # Clean header names: remove newlines and extra spaces
-                header = [str(c).replace('\n', ' ').strip() if c else "" for c in tbl[0]]
-
-                # Logic to identify the specific table by checking for key column headers
-                if ("Crop Name" in header and 
-                    "Total Number of Bags/Boxes" in header and 
-                    "Total Quantity (kgs)" in header):
-
-                    crop_idx = header.index("Crop Name")
-                    bags_idx = header.index("Total Number of Bags/Boxes")
-                    qty_idx = header.index("Total Quantity (kgs)")
-
-                    for r in tbl[1:]:
-                        if not any(r):
-                            continue
+            for table in tables:
+                df_tmp = pd.DataFrame(table)
+                # Check if this is the target table based on column headers
+                if any("Crop Name" in str(cell) for cell in table[0]):
+                    # Set the first row as header
+                    df_tmp.columns = [str(c).replace('\n', ' ') for c in df_tmp.iloc[0]]
+                    df_tmp = df_tmp[1:] # Remove header row from data
+                    
+                    for _, row in df_tmp.iterrows():
+                        crop = str(row.get("Crop Name", "")).strip()
+                        if not crop or "Total" in crop: continue
                         
-                        crop = (r[crop_idx] or "").strip()
-                        
-                        # Skip footer rows or empty rows
-                        if not crop or crop.lower() in ["total", "sub total"]:
-                            continue
-
-                        # Clean numeric strings (remove commas)
-                        bags_raw = str(r[bags_idx] or "0").replace(",", "").strip()
-                        qty_raw = str(r[qty_idx] or "0").replace(",", "").strip()
-
-                        # Convert to numeric, keep as string if conversion fails
-                        try:
-                            bags = int(float(bags_raw))
-                        except ValueError:
-                            bags = bags_raw
-                            
-                        try:
-                            qty = float(qty_raw)
-                        except ValueError:
-                            qty = qty_raw
-
-                        rows.append({
+                        all_data.append({
                             "Customer": customer,
                             "Crop": crop,
-                            "Bags": bags,
-                            "Quantity_kg": qty,
+                            "Bags": row.get("Total Number of Bags/Boxes", "0"),
+                            "Weight (kg)": row.get("Total Quantity (kgs)", "0")
                         })
-    
-    return pd.DataFrame(rows)
+    return pd.DataFrame(all_data)
 
-# --- UI Layout ---
-uploaded = st.file_uploader("Upload Gatepass (PDF)", type=["pdf"])
+uploaded_file = st.file_uploader("Choose a Gatepass PDF", type="pdf")
 
-if uploaded:
-    with st.spinner("Processing PDF..."):
-        try:
-            df = parse_gatepass_pdf(uploaded.read())
+if uploaded_file:
+    with st.spinner('Parsing PDF...'):
+        results_df = process_pdf(uploaded_file.read())
+        
+        if not results_df.empty:
+            st.success("Data Extracted!")
+            st.dataframe(results_df, use_container_width=True)
             
-            if df.empty:
-                st.warning("⚠️ No data found. Ensure the PDF contains the standard Crop Table.")
-            else:
-                st.success("Gatepass read successfully ✅")
-                
-                # Display Summary Metrics
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Total Items", len(df))
-                col2.metric("Total Bags", f"{df['Bags'].sum() if isinstance(df['Bags'].iloc[0], (int, float)) else 'N/A'}")
-                col3.metric("Total Qty (kg)", f"{df['Quantity_kg'].sum() if isinstance(df['Quantity_kg'].iloc[0], (int, float)) else 'N/A'}")
-
-                st.divider()
-                st.dataframe(df, use_container_width=True)
-
-                # Download Options
-                csv = df.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    label="Download Results as CSV",
-                    data=csv,
-                    file_name=f"gatepass_{df['Customer'].iloc[0] if not df.empty else 'export'}.csv",
-                    mime="text/csv",
-                )
-        except Exception as e:
-            st.error(f"An error occurred: {e}")
+            csv = results_df.to_csv(index=False).encode('utf-8')
+            st.download_button("Download as CSV", csv, "gatepass_data.csv", "text/csv")
+        else:
+            st.warning("No matching table found in the PDF.")
