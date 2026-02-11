@@ -13,13 +13,13 @@ uploaded = st.file_uploader("Upload Gatepass (PDF)", type=["pdf"])
 def extract_customer_from_text(text: str) -> str:
     """Get customer name from the 'To:' line."""
     lines = [l.strip() for l in text.splitlines() if l.strip()]
-    for i, line in enumerate(lines):
+    for line in lines:
         if line.startswith("To:"):
-            # e.g. "To: PJTJ TECHNOLOGIES PVT LTD"
+            # e.g. "To: Kiranakart Wholesale Pvt Ltd"
             return line.replace("To:", "").strip()
     return ""
 
-def find_table_indices(header: list) -> tuple | None:
+def find_table_indices(header: list):
     """
     Find indices for Crop, Bags, Quantity columns
     using flexible keyword matching.
@@ -68,7 +68,6 @@ def parse_gatepass_pdf(file_bytes: bytes) -> pd.DataFrame:
                     bags_raw = (r[bags_idx] or "").replace(",", "").strip()
                     qty_raw  = (r[qty_idx]  or "").replace(",", "").strip()
 
-                    # Try to convert to int, otherwise keep text
                     try:
                         bags = int(bags_raw)
                     except:
@@ -97,7 +96,7 @@ if uploaded:
     if df.empty:
         st.error(
             "Could not detect customer/crop table in this PDF. "
-            "Check if the PDF has a crop/bags/quantity table."
+            "Check if it has a crop / bags / quantity table."
         )
     else:
         st.success("Gatepass read successfully ✅")
