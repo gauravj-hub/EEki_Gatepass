@@ -10,12 +10,10 @@ uploaded = st.file_uploader("Upload Gatepass (PDF)", type=["pdf"])
 
 
 def extract_customer(text: str) -> str:
-    # Prefer line starting with 'To:'
     for line in text.splitlines():
         line = line.strip()
         if line.startswith("To:"):
             return line.replace("To:", "").strip()
-    # Fallback: line containing Fambo / Zomato / Kiranakart etc.
     for line in text.splitlines():
         if "Fambo" in line or "Zomato" in line or "Kiranakart" in line:
             return line.strip()
@@ -26,12 +24,9 @@ def parse_gatepass_from_text(text: str, default_customer: str = "") -> pd.DataFr
     rows = []
     customer = extract_customer(text) or default_customer or "Unknown"
 
-    # Normalize spaces
     clean = re.sub(r"[ \t]+", " ", text)
     lines = [l.strip() for l in clean.splitlines() if l.strip()]
 
-    # After header "Crop Name ... Total Quantity (kgs)" we expect rows:
-    # e.g. "Red Tomato (Oval) 200 4000"
     in_main_table = False
     for line in lines:
         if (
@@ -43,11 +38,9 @@ def parse_gatepass_from_text(text: str, default_customer: str = "") -> pd.DataFr
             continue
 
         if in_main_table:
-            # Stop when reaching 'Loose Bags/Boxes' or 'For Buyer'
             if line.startswith("Loose Bags/Boxes") or line.startswith("For Buyer"):
                 break
 
-            # Skip 'Total' row
             if line.lower().startswith("total"):
                 continue
 
@@ -86,8 +79,9 @@ if uploaded:
         df = pd.concat(all_pages, ignore_index=True)
         st.success("Gatepass read successfully ✅")
         st.dataframe(df, use_container_width=True)
-
         csv = df.to_csv(index=False).encode("utf-8")
         st.download_button("Download CSV", csv, "gatepass_summary.csv")
     else:
         st.error("❌ No crop rows detected from text in this PDF.")
+else:
+    st.info("Upload a gatepass PDF to start.")
