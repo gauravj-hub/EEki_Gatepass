@@ -1,89 +1,93 @@
 import streamlit as st
 import pdfplumber
 import pandas as pd
-from io import BytesIO
+import re
 
 st.set_page_config(page_title="Eeki Gatepass Reader", page_icon="🚚", layout="wide")
-st.title("Eeki Gatepass Reader (Customer / Crop / Bags / Qty)")
+st.title("Eeki Gatepass Reader (text based)")
 
 uploaded = st.file_uploader("Upload Gatepass (PDF)", type=["pdf"])
 
-def extract_customer_from_text(text: str) -> str:
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-    for line in lines:
+
+def extract_customer(text: str) -> str:
+    # Prefer line starting with 'To:'
+    for line in text.splitlines():
+        line = line.strip()
         if line.startswith("To:"):
             return line.replace("To:", "").strip()
+    # Fallback: line containing Fambo / Zomato / Kiranakart etc.
+    for line in text.splitlines():
+        if "Fambo" in line or "Zomato" in line or "Kiranakart" in line:
+            return line.strip()
     return ""
 
-def parse_gatepass_pdf(file_bytes: bytes) -> pd.DataFrame:
+
+def parse_gatepass_from_text(text: str, default_customer: str = "") -> pd.DataFrame:
     rows = []
+    customer = extract_customer(text) or default_customer or "Unknown"
 
-    with pdfplumber.open(BytesIO(file_bytes)) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text() or ""
-            customer = extract_customer_from_text(text)
+    # Normalize spaces
+    clean = re.sub(r"[ \t]+", " ", text)
+    lines = [l.strip() for l in clean.splitlines() if l.strip()]
 
-            tables = page.extract_tables()
-            for tbl in tables:
-                if not tbl or len(tbl) < 2:
+    # After header "Crop Name ... Total Quantity (kgs)" we expect rows:
+    # e.g. "Red Tomato (Oval) 200 4000"
+    in_main_table = False
+    for line in lines:
+        if (
+            "Crop Name" in line
+            and "Total Number of Bags/Boxes" in line
+            and "Total Quantity (kgs)" in line
+        ):
+            in_main_table = True
+            continue
+
+        if in_main_table:
+            # Stop when reaching 'Loose Bags/Boxes' or 'For Buyer'
+            if line.startswith("Loose Bags/Boxes") or line.startswith("For Buyer"):
+                break
+
+            # Skip 'Total' row
+            if line.lower().startswith("total"):
+                continue
+
+            parts = line.split()
+            if len(parts) >= 3:
+                try:
+                    bags = int(parts[-2].replace(",", ""))
+                    qty = int(parts[-1].replace(",", ""))
+                    crop = " ".join(parts[:-2])
+                    if crop:
+                        rows.append(
+                            {
+                                "Customer": customer,
+                                "Crop": crop,
+                                "Bags": bags,
+                                "Quantity_kg": qty,
+                            }
+                        )
+                except ValueError:
                     continue
-
-                header = [c.strip() if c else "" for c in tbl[0]]
-
-                # Our PDF has these exact headers in English part:
-                # "Crop Name | Total Number of Bags/Boxes | Weight per box (kgs) | Total Quantity (kgs)"
-                needed = [
-                    "Crop Name",
-                    "Total Number of Bags/Boxes",
-                    "Total Quantity (kgs)",
-                ]
-                if not all(h in header for h in needed):
-                    continue
-
-                crop_idx = header.index("Crop Name")
-                bags_idx = header.index("Total Number of Bags/Boxes")
-                qty_idx = header.index("Total Quantity (kgs)")
-
-                for r in tbl[1:]:
-                    if not r:
-                        continue
-                    crop = (r[crop_idx] or "").strip()
-                    if crop == "" or crop.lower() == "total":
-                        continue
-
-                    bags_raw = (r[bags_idx] or "").replace(",", "").strip()
-                    qty_raw  = (r[qty_idx]  or "").replace(",", "").strip()
-
-                    try:
-                        bags = int(bags_raw)
-                    except:
-                        bags = bags_raw
-
-                    try:
-                        qty = int(qty_raw)
-                    except:
-                        qty = qty_raw
-
-                    rows.append(
-                        {
-                            "Customer": customer,
-                            "Crop": crop,
-                            "Bags": bags,
-                            "Quantity_kg": qty,
-                        }
-                    )
 
     return pd.DataFrame(rows)
 
+
 if uploaded:
-    df = parse_gatepass_pdf(uploaded.read())
-    if df.empty:
-        st.error(
-            "Could not detect customer/crop table in this PDF. "
-            "Try another gatepass or we need to adjust header detection."
-        )
-    else:
+    all_pages = []
+
+    with pdfplumber.open(uploaded) as pdf:
+        for page_idx, page in enumerate(pdf.pages, start=1):
+            text = page.extract_text() or ""
+            df_page = parse_gatepass_from_text(text, default_customer=f"Page {page_idx}")
+            if not df_page.empty:
+                all_pages.append(df_page)
+
+    if all_pages:
+        df = pd.concat(all_pages, ignore_index=True)
         st.success("Gatepass read successfully ✅")
         st.dataframe(df, use_container_width=True)
+
         csv = df.to_csv(index=False).encode("utf-8")
         st.download_button("Download CSV", csv, "gatepass_summary.csv")
+    else:
+        st.error("❌ No crop rows detected from text in this PDF.")
